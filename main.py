@@ -34,6 +34,17 @@ email_index: dict[str, int] = {}
 next_lead_id = 1
 
 
+def reset_store() -> None:
+    """Clear in-memory state (used by tests and local resets)."""
+    global next_lead_id
+    leads.clear()
+    seen_event_ids.clear()
+    event_to_lead_id.clear()
+    phone_index.clear()
+    email_index.clear()
+    next_lead_id = 1
+
+
 def normalize_phone(raw: str | None) -> str:
     if not raw:
         return ""
