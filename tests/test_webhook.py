@@ -190,7 +190,10 @@ class TestFixtureSequence:
 
 class TestEnrichLead:
     def test_llm_enrich_when_api_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.config import get_settings
+
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        get_settings.cache_clear()
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.choices[0].message.content = json.dumps(
@@ -207,7 +210,7 @@ class TestEnrichLead:
             "summary": "",
         }
 
-        with patch.object(main, "_openai_client", return_value=mock_client):
+        with patch("app.llm._openai_client", return_value=mock_client):
             main.enrich_lead(lead)
 
         assert lead["service_category"] == "Performance Marketing"
@@ -215,7 +218,10 @@ class TestEnrichLead:
         mock_client.chat.completions.create.assert_called_once()
 
     def test_llm_failure_falls_back_to_heuristic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.config import get_settings
+
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        get_settings.cache_clear()
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = RuntimeError("API down")
 
@@ -225,7 +231,7 @@ class TestEnrichLead:
             "summary": "",
         }
 
-        with patch.object(main, "_openai_client", return_value=mock_client):
+        with patch("app.llm._openai_client", return_value=mock_client):
             main.enrich_lead(lead)
 
         assert lead["service_category"] == "AI Chatbot"

@@ -2,7 +2,7 @@
 
 **Multi-source lead webhook intake** for Parmarketing-style agency workflows. A single FastAPI service accepts leads from **website forms**, **Facebook Lead Ads**, and **WhatsApp**, normalizes contact data, deduplicates provider retries, merges the same person across channels, and enriches each lead with an LLM-assigned **service category** and **one-line summary**.
 
-Built for reliability under interview time constraints: in-memory storage, synchronous enrichment (optional background in production), and a full **pytest** suite covering normalization, API contracts, and the official six-event fixture sequence.
+Production-oriented FastAPI service with **SQLite/PostgreSQL** persistence, **background LLM enrichment** (configurable), optional **webhook HMAC** verification, **Docker Compose** deployment, and a full **pytest** suite. Product requirements: [`prd.md`](prd.md).
 
 ---
 
@@ -32,7 +32,10 @@ Built for reliability under interview time constraints: in-memory storage, synch
 | **Idempotent events** | Same `event_id` twice → `duplicate_event`, no data change. |
 | **Person merge** | Match existing lead by normalized **phone** or **email** → append message & source. |
 | **LLM enrichment** | `service_category` + English `summary` from all messages (OpenAI-compatible API). |
-| **Fast responses** | Always HTTP **200** with `{ "status", "lead_id" }` on success paths. |
+| **Fast responses** | HTTP **200** with `{ "status", "lead_id" }`; LLM runs in background when `ENRICH_SYNC=false`. |
+| **Persistence** | SQLAlchemy + SQLite (dev) or PostgreSQL (prod). |
+| **Security** | Optional `WEBHOOK_SECRET` + `X-Webhook-Signature` HMAC. |
+| **Operations** | `GET /health`, structured logs, Docker Compose stack. |
 
 ---
 
@@ -73,11 +76,10 @@ flowchart TB
   DUP --> WH
 ```
 
-Storage indexes (in [`main.py`](main.py)):
+Persistent storage model (SQLAlchemy — see [`app/models.py`](app/models.py)):
 
 ```mermaid
 erDiagram
-  LEADS ||--o{ MESSAGES : contains
   LEADS {
     int lead_id PK
     string name
@@ -86,23 +88,27 @@ erDiagram
     string service_category
     string summary
   }
-  EVENTS {
+  LEAD_MESSAGES {
+    int id PK
+    int lead_id FK
+    int position
+    string text
+  }
+  LEAD_SOURCES {
+    int id PK
+    int lead_id FK
+    string source
+  }
+  PROCESSED_EVENTS {
     string event_id PK
     int lead_id FK
   }
-  INDEX_PHONE {
-    string phone PK
-    int lead_id FK
-  }
-  INDEX_EMAIL {
-    string email PK
-    int lead_id FK
-  }
-  LEADS ||--o{ SOURCES : has
-  EVENTS }o--|| LEADS : maps_to
-  INDEX_PHONE }o--|| LEADS : maps_to
-  INDEX_EMAIL }o--|| LEADS : maps_to
+  LEADS ||--o{ LEAD_MESSAGES : contains
+  LEADS ||--o{ LEAD_SOURCES : has
+  LEADS ||--o{ PROCESSED_EVENTS : idempotent_by
 ```
+
+Runtime lookup uses indexed **phone** and **email** on `LEADS` plus `PROCESSED_EVENTS.event_id` for deduplication.
 
 ---
 
@@ -331,9 +337,12 @@ Copy [`.env.example`](.env.example) to `.env`:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
+| `DATABASE_URL` | Optional | Default `sqlite:///./data/leads.db`; use Postgres in production. |
 | `OPENAI_API_KEY` | Recommended | OpenAI (or compatible) API key for LLM enrichment. |
 | `OPENAI_BASE_URL` | Optional | Override base URL (Groq, OpenRouter, etc.). |
 | `OPENAI_MODEL` | Optional | Default: `gpt-4o-mini`. |
+| `ENRICH_SYNC` | Optional | `true` = wait for LLM in request; `false` = background (default). |
+| `WEBHOOK_SECRET` | Optional | When set, requires valid `X-Webhook-Signature: sha256=<hex>`. |
 
 Without `OPENAI_API_KEY`, the service uses keyword heuristics for category and the first message (truncated) as summary — sufficient for local demos and tests.
 
@@ -356,6 +365,13 @@ cp .env.example .env        # add OPENAI_API_KEY if you have one
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+**Docker (API + Postgres)**
+
+```bash
+docker compose up --build
+```
+
+- Health: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 - Interactive docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - OpenAPI JSON: [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
 
@@ -400,31 +416,36 @@ pytest tests/test_webhook.py::TestFixtureSequence::test_six_events_expected_outc
 
 ```
 lead_tracker/
-├── main.py                 # FastAPI app, store, normalization, LLM enrich
-├── requirements.txt        # Runtime + pytest + httpx
+├── prd.md                  # Product requirements
+├── main.py                 # Entrypoint + test re-exports
+├── app/
+│   ├── api.py              # Routes, background LLM
+│   ├── config.py           # Environment settings
+│   ├── db.py               # SQLAlchemy engine
+│   ├── models.py           # Lead, messages, sources, events
+│   ├── repository.py       # Dedupe, merge, persistence
+│   ├── llm.py              # Enrichment + heuristics
+│   ├── security.py         # Webhook HMAC
+│   └── ...
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
 ├── pytest.ini
-├── .env.example
-├── .gitignore
-├── README.md
-├── scripts/
-│   └── send_events.py      # Manual E1–E6 demo
+├── scripts/send_events.py
 └── tests/
-    ├── conftest.py         # Client fixture, fixture payloads, store reset
-    ├── test_normalization.py
-    └── test_webhook.py
 ```
 
 ---
 
 ## Production roadmap
 
-| Area | Today | Production direction |
-|------|--------|----------------------|
-| **Storage** | In-memory lists & dicts | PostgreSQL; unique index on `event_id` |
-| **LLM** | Sync in request | Queue worker; retries; cache by message hash |
-| **Webhooks** | Open POST | HMAC signature verification per provider |
-| **Scale** | Single process | Horizontal API + shared DB; rate limits |
-| **Observability** | Basic logging | Structured logs, metrics on merge/dedupe/LLM latency |
+| Area | Shipped | Next steps |
+|------|---------|------------|
+| **Storage** | SQLite + PostgreSQL via `DATABASE_URL` | Migrations (Alembic), read replicas |
+| **LLM** | Background tasks when `ENRICH_SYNC=false` | Queue worker, retries, cache by message hash |
+| **Webhooks** | Optional HMAC secret | Provider-specific signature formats |
+| **Scale** | Docker Compose | Horizontal API + connection pooling, rate limits |
+| **Observability** | Request logging | OpenTelemetry, metrics on merge/dedupe/LLM latency |
 
 ---
 

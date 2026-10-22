@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+
+os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["ENRICH_SYNC"] = "true"
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -8,9 +13,13 @@ import main
 
 @pytest.fixture(autouse=True)
 def isolated_store(monkeypatch: pytest.MonkeyPatch):
-    """Fresh in-memory store and no live LLM calls during tests."""
-    main.reset_store()
+    """Fresh database and no live LLM calls during tests."""
+    from app.config import get_settings
+
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WEBHOOK_SECRET", raising=False)
+    get_settings.cache_clear()
+    main.reset_store()
     yield
     main.reset_store()
 
